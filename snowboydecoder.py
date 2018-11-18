@@ -10,7 +10,6 @@ import logging
 from ctypes import *
 from contextlib import contextmanager
 
-logging.basicConfig()
 logger = logging.getLogger("snowboy")
 logger.setLevel(logging.INFO)
 TOP_DIR = os.path.dirname(os.path.abspath(__file__))

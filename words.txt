@@ -10,7 +10,7 @@ open tab
 open tweet
 close tweet
 retweet
-favorite
+like
 next
 next tweet
 previous
@@ -36,7 +36,10 @@ go to google
 go to twitter
 go to facebook
 go to youtube
+go to hacker news
 open google
 open twitter
 open facebook
 open youtube
+open hacker news
+again

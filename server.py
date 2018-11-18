@@ -1,6 +1,42 @@
 #!/usr/bin/env python
 from __future__ import division, print_function
 
+from datetime import datetime
+import os
+import logging
+
+os.makedirs('log', exist_ok=True)
+log = logging.getLogger('esper')
+log.setLevel(logging.DEBUG)
+
+class MyFormatter(logging.Formatter):
+    converter=datetime.fromtimestamp
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            s = ct.strftime(datefmt)
+        else:
+            t = ct.strftime("%Y-%m-%d %H:%M:%S")
+            s = "%s.%03d" % (t, record.msecs)
+        return s
+
+log_fmt = MyFormatter('%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
+fh = logging.FileHandler('log/esper.log')
+fh.setFormatter(log_fmt)
+log.addHandler(fh)
+
+session_counter = 0
+try:
+    with open('log/session_counter') as fin:
+        session_counter = int(fin.read())
+except:
+    pass
+
+with open('log/session_counter', 'w') as fout:
+    fout.write(str(session_counter+1))
+
+os.makedirs(os.path.join('log', 'session', str(session_counter)), exist_ok=True)
+
 import argparse
 import asyncio
 import collections
@@ -9,10 +45,10 @@ import functools
 import janus
 import json
 import numpy as np
-import pyaudio
 import shlex
 import snowboydecoder
 import subprocess
+import sys
 import time
 import wave
 import webrtcvad
@@ -28,10 +64,11 @@ N_CONTEXT = 9
 BEAM_WIDTH = 512
 SAMPLE_RATE = 16000
 
-SOX_CMD = 'rec -q -V0 --compression 0.0 --no-dither -e signed -L -c 1 -b 16 -r 16k -t raw - '
-# SOX_CMD = 'sox -t coreaudio "Background Musi" -q -V0 --compression 0.0 --no-dither -e signed -L -c 1 -b 16 -r 16k -t raw -'
+SOX_CMD = 'rec -q -V0 --compression 0.0 --no-dither -e signed -L -c 1 -b 16 -r 16k -t raw - gain -2'
+# SOX_CMD = 'sox -t coreaudio "Background Musi" -q -V0 --compression 0.0 --no-dither -e signed -L -c 1 -b 16 -r 16k -t raw - gain -3 lowpass -2 4k'
 
 listening = False
+started_listening = None
 subproc = None
 sctx = None
 model = None
@@ -45,122 +82,197 @@ parser.add_argument('--lm', nargs='?',
                     help='Path to the language model binary file')
 parser.add_argument('--snowboy', nargs='?',
                     help='Path to the Snowboy hot-word detection model file')
+parser.add_argument('--verbose', action='store_true')
 args = parser.parse_args()
 
-print('Loading acoustic model...')
+if args.verbose:
+    sh = logging.StreamHandler()
+    sh.setFormatter(log_fmt)
+    log.addHandler(sh)
+
+log.debug('Session {} start'.format(session_counter))
+
+log.debug('Loading acoustic model...')
 model = ds.Model(args.model, N_FEATURES, N_CONTEXT, args.alphabet, BEAM_WIDTH)
 
-print('Loading language model...')
+log.debug('Loading language model...')
 model.enableDecoderWithLM(args.alphabet, args.lm, args.alphabet, ALPHA, BETA)
 
-print('Loading voice activity detector...')
-vad = webrtcvad.Vad(mode=0)
+log.debug('Loading voice activity detector...')
+vad = webrtcvad.Vad(mode=3)
 
 # Thread messaging queue
 loop = asyncio.get_event_loop()
 queue = janus.Queue(loop=loop)
 
-
 def play_audio_file(fname="listening.wav"):
-    ding_wav = wave.open(fname, 'rb')
-    ding_data = ding_wav.readframes(ding_wav.getnframes())
-    audio = pyaudio.PyAudio()
-    stream_out = audio.open(
-        format=audio.get_format_from_width(ding_wav.getsampwidth()),
-        channels=ding_wav.getnchannels(),
-        rate=ding_wav.getframerate(), input=False, output=True)
-    stream_out.start_stream()
-    stream_out.write(ding_data)
-    time.sleep(0.2)
-    stream_out.stop_stream()
-    stream_out.close()
-    audio.terminate()
+    subprocess.call(shlex.split("play -q -V0 \"{}\" gain -6 speed 1.5".format(fname)))
 
 
 def snowboy_thread(q):
     def callback():
-        q.put(datetime.utcnow())
-        play_audio_file()
+        if connected_clients:
+            q.put(datetime.utcnow())
+            play_audio_file()
 
-    print('Loading hot-word detector...')
-    detector = snowboydecoder.HotwordDetector(args.snowboy, sensitivity=0.5)
+    log.debug('Loading hot-word detector...')
+    detector = snowboydecoder.HotwordDetector(args.snowboy, sensitivity=0.4)
     detector.start(detected_callback=callback, sleep_time=0.03)
 
 
-async def producer(ws):
-    print('Producer started')
-    global listening
+async def send_to_all_clients(msg):
+    for ws, cond in connected_clients:
+        try:
+            await ws.send(msg)
+        except websockets.exceptions.ConnectionClosed:
+            log.debug('Client connection closed: {}'.format(ws.remote_address))
+            with await cond:
+                cond.notify()
 
-    ringbuffer = collections.deque(maxlen=10) # 200ms of buffering
+
+async def producer():
+    log.debug('Producer started')
+    global listening
+    global started_listening
+
+    ringbuffer = collections.deque(maxlen=20)
+    ringbuffer_frames = collections.deque(maxlen=20)
+    voiced_threshold = 0.9 * ringbuffer.maxlen
+    unvoiced_threshold = 0
+
     heard_something = False
 
-    i = 0
+    recording = None
+
+    count = 0
+    cur_wav = 'log/session/{}/cmd{}.wav'.format(session_counter, count)
+    wavout = wave.open(cur_wav, 'wb')
+    wavout.setnchannels(1)
+    wavout.setsampwidth(2)
+    wavout.setframerate(SAMPLE_RATE)
 
     while True:
         if listening:
             frame = subproc.stdout.read(320)
             if frame:
-                model.feedAudioContent(sctx, np.frombuffer(frame, np.int16))
                 voiced = vad.is_speech(frame, SAMPLE_RATE)
-
                 ringbuffer.append(1 if voiced else 0)
                 num_voiced = sum(ringbuffer)
+                wavout.writeframes(frame)
 
-                if not heard_something and num_voiced > 0.9 * ringbuffer.maxlen:
-                    print('Heard something')
+                if heard_something:
+                    model.feedAudioContent(sctx, np.frombuffer(frame, np.int16))
+                else:
+                    ringbuffer_frames.append(frame)
+
+                if not heard_something and num_voiced >= voiced_threshold:
+                    log.debug('Heard something')
                     heard_something = True
 
-                if heard_something and num_voiced <= 0.1 * ringbuffer.maxlen:
-                    print('VAD detected silence')
+                    for f in ringbuffer_frames:
+                        model.feedAudioContent(sctx, np.frombuffer(f, np.int16))
+
+                if heard_something and num_voiced <= unvoiced_threshold:
                     listening = False
-                    heard_something = False
+                    ringbuffer.clear()
+
+                if (datetime.now() - started_listening) > timedelta(seconds=3):
+                    log.debug('3 seconds timeout')
+                    listening = False
                     ringbuffer.clear()
 
             if not frame or not listening:
-                print('EOF or VAD, stop listening')
+                log.debug('EOF or VAD, stop listening')
                 listening = False
-                heard_something = False
-                transcription = model.finishStream(sctx)
-                print('Transcription:', transcription)
-                await ws.send(json.dumps({
-                    'type': 'result',
-                    'result': transcription
-                }))
-                subproc.terminate()
+                if heard_something:
+                    transcription = model.finishStream(sctx)
+                    res = {
+                        'type': 'result',
+                        'result': transcription
+                    }
 
-            await asyncio.sleep(.02)
+                    await send_to_all_clients(json.dumps(res))
+
+                    log.debug(json.dumps({
+                        'session_counter': session_counter,
+                        'cmd_path': cur_wav,
+                        'res': res
+                    }))
+                else:
+                    res = {
+                        'type': 'no_voice'
+                    }
+
+                    await send_to_all_clients(json.dumps(res))
+
+                    log.debug(json.dumps({
+                        'session_counter': session_counter,
+                        'res': res
+                    }))
+
+                heard_something = False
+                wavout.close()
+
+                count += 1
+                cur_wav = 'log/session/{}/cmd{}.wav'.format(session_counter, count)
+                wavout = wave.open(cur_wav, 'wb')
+                wavout.setnchannels(1)
+                wavout.setsampwidth(2)
+                wavout.setframerate(SAMPLE_RATE)
+
+                subproc.terminate()
         else:
             await asyncio.sleep(.1)
 
-
-async def consumer(ws, q):
+async def consumer(q):
     global sctx
     global subproc
     global stdout
     global listening
+    global started_listening
 
-    print('Waiting for hot-word...')
+    log.debug('Waiting for hot-word...')
     while True:
         detected = await q.get()
-        if datetime.utcnow() - detected  > timedelta(seconds=5):
-            continue # discard old detections (browser not connected)
+        if datetime.utcnow() - detected  > timedelta(seconds=3):
+            continue # discard old detections
 
-        print('Hot-word detected, preparing...')
-        await ws.send(json.dumps({
+        log.debug('Hot-word detected, preparing...')
+
+        await send_to_all_clients(json.dumps({
             'type': 'listening'
         }))
+
         sctx = model.setupStream()
-        subproc = subprocess.Popen(
-            shlex.split(SOX_CMD),
-            stdout=subprocess.PIPE,
-            bufsize=0)
-        print('Listening...')
+        subproc = subprocess.Popen(shlex.split(SOX_CMD), stdout=subprocess.PIPE)
+        log.debug('Listening...')
+        started_listening = datetime.now()
         listening = True
 
 
+async def ping():
+    while True:
+        await send_to_all_clients(json.dumps({
+            'type': 'ping'
+        }))
+        await asyncio.sleep(3)
+
+
+connected_clients = set()
+
+
 async def serve(websocket, path):
-    consumer_task = asyncio.ensure_future(consumer(websocket, queue.async_q))
-    producer_task = asyncio.ensure_future(producer(websocket))
+    log.debug('Client connected: {}'.format(websocket.remote_address))
+    cond = asyncio.Condition()
+    connected_clients.add((websocket, cond))
+    async with cond:
+        await cond.wait()
+        connected_clients.remove((websocket, cond))
+
+
+async def run_workers():
+    consumer_task = asyncio.ensure_future(consumer(queue.async_q))
+    producer_task = asyncio.ensure_future(producer())
     done, pending = await asyncio.wait(
         [consumer_task, producer_task],
         return_when=asyncio.FIRST_COMPLETED,
@@ -171,8 +283,10 @@ async def serve(websocket, path):
 
 start_server = websockets.serve(serve, 'localhost', 8777)
 
-print('Starting event loop...')
+log.debug('Starting event loop...')
 snowboy = loop.run_in_executor(None, snowboy_thread, queue.sync_q)
+asyncio.ensure_future(consumer(queue.async_q))
+asyncio.ensure_future(producer())
+asyncio.ensure_future(ping())
 asyncio.get_event_loop().run_until_complete(start_server)
-asyncio.get_event_loop().run_until_complete(snowboy)
 asyncio.get_event_loop().run_forever()

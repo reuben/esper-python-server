@@ -8,7 +8,6 @@ websockets = "*"
 numpy = "*"
 deepspeech = {path = "./deepspeech-0.3.0a1-cp36-cp36m-macosx_10_14_x86_64.whl"}
 requests = "*"
-snowboy = "*"
 webrtcvad = "*"
 janus = "*"
 pyaudio = "*"

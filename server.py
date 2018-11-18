@@ -74,13 +74,13 @@ sctx = None
 model = None
 
 parser = argparse.ArgumentParser(description='DeepSpeech speech-to-text from microphone')
-parser.add_argument('--model', required=True,
+parser.add_argument('--model', default='output_graph.pbmm',
                     help='Path to the model (protocol buffer binary file)')
-parser.add_argument('--alphabet', required=True,
+parser.add_argument('--alphabet', default='alphabet.txt',
                     help='Path to the configuration file specifying the alphabet used by the network')
-parser.add_argument('--lm', nargs='?',
+parser.add_argument('--lm', default='esper-lm.binary',
                     help='Path to the language model binary file')
-parser.add_argument('--snowboy', nargs='?',
+parser.add_argument('--snowboy', default='heyesper.pmdl',
                     help='Path to the Snowboy hot-word detection model file')
 parser.add_argument('--verbose', action='store_true')
 args = parser.parse_args()

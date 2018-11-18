@@ -64,7 +64,7 @@ N_CONTEXT = 9
 BEAM_WIDTH = 512
 SAMPLE_RATE = 16000
 
-SOX_CMD = 'rec -q -V0 --compression 0.0 --no-dither -e signed -L -c 1 -b 16 -r 16k -t raw - gain -2'
+SOX_CMD = 'rec -q -V0 --compression 0.0 --no-dither -e signed -L -c 1 -b 16 -r 16k -t raw - gain -2 lowpass -2 4k'
 # SOX_CMD = 'sox -t coreaudio "Background Musi" -q -V0 --compression 0.0 --no-dither -e signed -L -c 1 -b 16 -r 16k -t raw - gain -3 lowpass -2 4k'
 
 listening = False
@@ -160,17 +160,11 @@ async def producer():
                 num_voiced = sum(ringbuffer)
                 wavout.writeframes(frame)
 
-                if heard_something:
-                    model.feedAudioContent(sctx, np.frombuffer(frame, np.int16))
-                else:
-                    ringbuffer_frames.append(frame)
+                model.feedAudioContent(sctx, np.frombuffer(frame, np.int16))
 
                 if not heard_something and num_voiced >= voiced_threshold:
                     log.debug('Heard something')
                     heard_something = True
-
-                    for f in ringbuffer_frames:
-                        model.feedAudioContent(sctx, np.frombuffer(f, np.int16))
 
                 if heard_something and num_voiced <= unvoiced_threshold:
                     listening = False

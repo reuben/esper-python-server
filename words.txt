@@ -11,6 +11,8 @@ open tweet
 close tweet
 retweet
 like
+reply
+confirm
 next
 next tweet
 previous
@@ -26,12 +28,16 @@ down
 scroll down
 louder
 quieter
+play
+stop
 volume up
 volume down
+mute
 zoom in
 zoom out
 undo
 redo
+again
 go to google
 go to twitter
 go to facebook
@@ -42,4 +48,3 @@ open twitter
 open facebook
 open youtube
 open hacker news
-again

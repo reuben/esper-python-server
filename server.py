@@ -96,7 +96,7 @@ log.debug('Loading acoustic model...')
 model = ds.Model(args.model, N_FEATURES, N_CONTEXT, args.alphabet, BEAM_WIDTH)
 
 log.debug('Loading language model...')
-model.enableDecoderWithLM(args.alphabet, args.lm, args.alphabet, ALPHA, BETA)
+model.enableDecoderWithLM(args.alphabet, args.lm, '', ALPHA, BETA)
 
 log.debug('Loading voice activity detector...')
 vad = webrtcvad.Vad(mode=3)
